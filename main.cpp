@@ -5,8 +5,14 @@
 #include <time.h>
 #include "string.h"
 #include <string>
+#include "cJSON.h"
 
 
+/**
+ * 第一个命令行是选择在线抓包还是离线抓包
+ * 第二个命令行是配置文件位置
+ * 第三个命令行是拿配置文件第几个路径（从零开始）
+ */
 
 #define ETHERTYPE_IPV4 0x0800
 #define ETHERTYPE_IPV6 0x86DD
@@ -15,7 +21,84 @@
 #define ETHERTYPE_PPP 0x880B
 #define PCAP_DATABUF_MAX 65535
 
-using namespace std;
+char filename[1024];
+char str[65535];
+
+
+int net;
+//读取配置文件
+void ReadFile(char *path){
+    FILE *fp=fopen(path,"r");
+    char string[65535];
+
+    if (!fp){
+        printf("File open file");
+        exit(-1);
+    }
+    int i=0;
+    while (fgets(string, sizeof(string),fp)){
+        int len=strlen(string);
+        for (int j = 0; j < len; ++j) {
+            if (string[j]==' '){
+                continue;
+            }
+            if (string[j]=='\n'){
+                continue;
+            }
+            str[i++]=string[j];
+        }
+    };
+    fclose(fp);
+    printf("%s\n",str);
+
+}//读取文件到字符串
+//解析JSON到JSON对象
+cJSON *getJSONParse(){
+    cJSON *root = cJSON_Parse(str);
+    if (!root){
+        printf("get root fail!\n");
+        exit(-1);
+    }
+    return root;
+}
+//查找子节点
+cJSON *getObjectItems(cJSON * root,char * title){
+    cJSON *js_list = cJSON_GetObjectItem(root,title);
+    if (!js_list){
+        printf("no list!\n");
+        exit(-1);
+    }
+    return js_list;
+}
+//查找最终的结点
+cJSON *getfinalItems(cJSON *items,int number){
+    cJSON *item=items->child;
+    int k=cJSON_GetArraySize(items);
+    if (number >= k){
+        printf("超出json范围");
+        return  NULL;
+    }
+    for (int i = 0; i < k; ++i) {
+        if (i==number){
+            return item;
+        }
+        item=item->next;
+    }
+    printf("没有找到");
+}
+
+char *getPath(char *path,char *numbers){
+    ReadFile(path);
+    int lens= strlen(str);
+    cJSON *root=getJSONParse();
+    cJSON *js_list=getObjectItems(root,"file");
+    int number =atoi(numbers);
+
+    cJSON *item=getfinalItems(js_list,number);
+    printf("%s",item->valuestring);
+    return item->valuestring;
+}
+
 
 typedef unsigned  char u_int8; //8 bit
 typedef unsigned short u_int16; // 16 bit
@@ -94,34 +177,46 @@ eth_hdr *ethernet;
 PPPOE_hdr *pppoeHdr;
 RDP_hdr *rdpHdr;
 
+
+void SaveFile(const unsigned char *p_packet_content,u_int32 lenth, u_int32 len){
+    if (p_packet_content[lenth] == 0x47){
+        FILE *file=fopen(filename,"ab+");
+        if (!file){
+            printf("file open fail");
+        }
+        p_packet_content=p_packet_content+lenth;
+        int length=len-lenth;
+        char out[length];
+        for (int i = 0; i < length; ++i) {
+            out[i]=p_packet_content[i];
+        }
+
+        fwrite(out, sizeof(char), sizeof(out),file);
+        fclose(file);
+    }
+}
+
+void printRDP(){
+    printf("It's Rdp\n");
+    printf("flag: %d\n",rdpHdr->flag);
+    printf("Playload_type: %d\n",rdpHdr->Payload_type);
+    printf("sequence-number: %d\n",rdpHdr->sequence_number);
+    printf("identifier: %d\n",rdpHdr->identifier);
+}
 //解析RDP包头
 void parseRDP(const unsigned char *p_packet_content, u_int32 lenth, u_int32 len){
-    printf("It's Rdp\n");
+
     rdpHdr= static_cast<RDP_hdr *>(malloc(sizeof(RDP_hdr)));
     rdpHdr->flag=p_packet_content[lenth++];
     rdpHdr->Payload_type=p_packet_content[lenth++];
     rdpHdr->sequence_number=(p_packet_content[lenth++]<<8)+p_packet_content[lenth++];
     rdpHdr->Timestamp = (p_packet_content[lenth++]<<24)+(p_packet_content[lenth++]<<16)+(p_packet_content[lenth++]<<8)+p_packet_content[lenth++];
     rdpHdr->identifier=(p_packet_content[lenth++]<<24)+(p_packet_content[lenth++]<<16)+(p_packet_content[lenth++]<<8)+p_packet_content[lenth++];
-    printf("flag: %d\n",rdpHdr->flag);
-    printf("Playload_type: %d\n",rdpHdr->Payload_type);
-    printf("sequence-number: %d\n",rdpHdr->sequence_number);
-    printf("identifier: %d\n",rdpHdr->identifier);
-    FILE *file=fopen("/home/oida/ouput1","ab+");
-    if (!file){
-        printf("file open fail");
-    }
-    p_packet_content=p_packet_content+lenth;
-    int length=len-lenth;
-    char out[length];
-    for (int i = 0; i < length; ++i) {
-        out[i]=p_packet_content[i];
-    }
+    printRDP();
+    SaveFile(p_packet_content,lenth,len);
 
-    fwrite(out, sizeof(char), sizeof(out),file);
-    fclose(file);
+
 }
-
 //解析UDP包头
 void parseUdpAndIp(const unsigned char *p_packet_content, u_int32 lenth, u_int32 len){
 
@@ -135,11 +230,29 @@ void parseUdpAndIp(const unsigned char *p_packet_content, u_int32 lenth, u_int32
     printf("udp_dport = %u\n",udp->dport);
     printf("Pktlen : %u\n",udp->pktlen);
     printf("check_sum : %u\n",udp->check_sum);
-    parseRDP(p_packet_content,lenth,len);
+    if (p_packet_content[lenth] == 0x80){
+        parseRDP(p_packet_content,lenth,len);
+    }else if(p_packet_content[lenth] == 0x47){
+
+        if (net == 1){
+            SaveFile(p_packet_content,lenth,len);
+        }else
+        {
+            p_packet_content=p_packet_content+lenth;
+            int length=len-lenth;
+            char out[length];
+            for (int i = 0; i < length; ++i) {
+                out[i]=p_packet_content[i];
+            }
+
+            //net
+        }
+
+    }else {
+        system("pause");
+    }
 
 }
-
-
 //ip整型转换点分十进制
 char *InttoIpv4str(u_int32 num){
     char *ipstr= (char*)calloc(128, sizeof(char*));
@@ -151,7 +264,6 @@ char *InttoIpv4str(u_int32 num){
     }
     return ipstr;
 }
-
 void PrintIP(){
     u_int32 saddr = (u_int32) ntohl(ip->src_ip);//网络字节序转换成主机字节序
     u_int32 daddr = (u_int32) ntohl(ip->dst_ip);
@@ -167,8 +279,6 @@ void PrintIP(){
     printf("ip option:%u\n",ip->option);
     printf("ip surv_tm:%u\n",ip->surv_tm);
 }
-
-
 //解析IP包头
 void parseIp(const unsigned char *p_packet_content, u_int32 eth_len, u_int32 len){
 
@@ -178,7 +288,6 @@ void parseIp(const unsigned char *p_packet_content, u_int32 eth_len, u_int32 len
 
     ip=(struct ip_hdr*) (p_packet_content+eth_len);
     ip_len = (ip->ver_hl & 0x0f)*4; //ip头的长度
-
 
     printf("eth_len:%u ip_len:%u tcp_len:%u udp_len:%u\n",eth_len,ip_len,tcp_len);
 
@@ -202,7 +311,6 @@ void parseIp(const unsigned char *p_packet_content, u_int32 eth_len, u_int32 len
         printf("It's ICMP\n");
     }
 }
-
 //解析PPPOE包头
 void parsePPPOE(const unsigned char *p_packet_content, u_int32 eth_len){
     pppoeHdr= static_cast<PPPOE_hdr *>(malloc(sizeof(PPPOE_hdr)));
@@ -213,7 +321,6 @@ void parsePPPOE(const unsigned char *p_packet_content, u_int32 eth_len){
     pppoeHdr->LENGTH=(p_packet_content[length++]<<8)+p_packet_content[length++];
     pppoeHdr->ppp.protocol=(p_packet_content[length++]<<8)+p_packet_content[length++];
 }
-
 //分离数据链路层
 void divide_ethernet(const unsigned  char *p_packet_content){
     ethernet = (struct eth_hdr*)p_packet_content;
@@ -230,7 +337,6 @@ void divide_ethernet(const unsigned  char *p_packet_content){
 
     printf("\neth_type:%4x\n",ntohs(ethernet->eth_type));
 }
-
 //解析回调函数
 void pcap_callback(const unsigned  char *p_packet_content,struct  pcap_pkthdr protocol_header){
 
@@ -253,11 +359,18 @@ void pcap_callback(const unsigned  char *p_packet_content,struct  pcap_pkthdr pr
         printf("It's IPv6 !\n");
     }else if (ntohs(ethernet->eth_type)== ETHERTYPE_PPPOE1 || (ntohs(ethernet->eth_type)==ETHERTYPE_PPPOE2))//PPPOE
     {
-        printf("It's PPPOE! \n");
+
         parsePPPOE(p_packet_content, eth_len);
+        printf("It's PPPOE! \n");
+        printf("PPPOE Version_Type: %lu\n",pppoeHdr->version);
         printf("PPPOE length: %hu\n",pppoeHdr->LENGTH);
         printf("PPPOE session ID: %4x\n",pppoeHdr->SESSION_ID);
-        printf("PPP protocol:%4x\n",pppoeHdr->ppp.protocol);
+        if (pppoeHdr->ppp.protocol == 0x0021){
+            printf("PPP protocol:IPV4\n",pppoeHdr->ppp.protocol);
+        } else{
+            printf("PPP protocol: %lu\n",pppoeHdr->ppp.protocol);
+        }
+
         eth_len=eth_len+ sizeof(struct PPPOE_hdr);
         parseIp(p_packet_content,eth_len,protocol_header.len);
     }else if (ntohs(ethernet->eth_type)== ETHERTYPE_PPP){ //纯ppp
@@ -265,7 +378,7 @@ void pcap_callback(const unsigned  char *p_packet_content,struct  pcap_pkthdr pr
     }
 
 }
-
+//获得数据报
 void getPcap(const unsigned  char *p_packet_content,struct  pcap_pkthdr protocol_header,pcap_t *pcap_handler,int flag){
     int count=0;
     while (p_packet_content || flag ==1){
@@ -280,13 +393,7 @@ void getPcap(const unsigned  char *p_packet_content,struct  pcap_pkthdr protocol
             break;
         }
         printf("Hello 黄逸东\n");
-        for (int i = 0; i < protocol_header.len; ++i) {
-            printf("%02x ",p_packet_content[i]);
-            if (i%32 ==0 && i!= 0){
-                printf("\n");
-            }
-        }
-        printf("\n");
+
         pcap_callback(p_packet_content,protocol_header);
         count++;
 
@@ -295,23 +402,19 @@ void getPcap(const unsigned  char *p_packet_content,struct  pcap_pkthdr protocol
     printf("\n%d",count);
 }
 
-void readConfig(char *path){
-    FILE *fp;
-    fp=fopen(path,"r");
-    if (fp == NULL){
-        printf("%s Couldn't open file",path);
-    }
-    while (feof(fp)== 0){
-
-    }
-}
-
 
 int main(int argc,char *argv[],char *envp[]){
+
+    strcpy(filename,argv[4]);
+    net=atoi(argv[5]);
+    if (remove(filename) == 0){
+        printf("Removed %s.\n",filename);
+    } else{
+        perror("remove");
+    }
     pcap_t *pcap_handler = NULL;
-    const unsigned  char *p_packet_content = NULL;//
+    const unsigned  char *p_packet_content = NULL;
     char *dev,errbuf[PCAP_ERRBUF_SIZE];
-//    char *pcap_file = "one.pcap";
     struct  pcap_pkthdr protocol_header;
     //获得设备名
     dev=pcap_lookupdev(errbuf);
@@ -320,21 +423,25 @@ int main(int argc,char *argv[],char *envp[]){
         return 1;
     }
     printf("Device: %s\n",dev);
-    printf("argv :%s",argv[0]);
+    printf("argv :%s\n",argv[0]);
     //live
     //获得第一个命令行参数
     char * live=argv[1];
-    string li;
-    if (live == NULL){
+    std::string li;
+    if (live == NULL){//如果没有填写，则为默认值
         li="1";
     } else{
-        li = live;
+        li = live;//如果有填写，按填写值
     }
 
     if (li == "1"){
-        pcap_handler=pcap_open_live(dev,65535,1,0,errbuf);
+        struct bpf_program filter;
+
+        pcap_handler=pcap_open_live(dev,65535,1,10000,errbuf);
+        pcap_compile(pcap_handler,&filter,"dst host 239.1.1.1",1,0);
+        pcap_setfilter(pcap_handler,&filter);
     } else {
-        char const *pcap_file="/home/oida/CLionProjects/untitled/one.pcapng";
+        char const *pcap_file=getPath(argv[2],argv[3]);
         pcap_handler=pcap_open_offline(pcap_file,errbuf);
     }
 
