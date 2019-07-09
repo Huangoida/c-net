@@ -6,7 +6,9 @@
 #include "string.h"
 #include <string>
 #include "cJSON.h"
-
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/types.h>
 
 /**
  * 第一个命令行是选择在线抓包还是离线抓包
@@ -23,6 +25,33 @@
 
 char filename[1024];
 char str[65535];
+
+int sockfd;
+struct  sockaddr_in dest_addr;
+
+void init(){
+    sockfd = socket(AF_INET,SOCK_DGRAM,0);
+    if (sockfd == -1){
+        perror("socket()");
+        return;
+    }
+    dest_addr.sin_family=AF_INET;
+    dest_addr.sin_addr.s_addr = inet_addr("239.2.1.1");
+    dest_addr.sin_port = htons(8000);
+
+    while((sockfd == socket(AF_INET,SOCK_DGRAM,0)) == -1);
+    while(connect(sockfd,(struct sockaddr *)&dest_addr, sizeof(struct sockaddr)) == -1);
+
+    int sin_size = sizeof(struct sockaddr_in);
+    int time_live= 64;
+    setsockopt(sockfd,IPPROTO_IP,IP_MULTICAST_TTL,(void *)&time_live, sizeof(time_live));
+
+}
+
+int forware_pkt(char *buf,int length){
+    send(sockfd,buf,length,0);
+    return 0;
+}
 
 
 int net;
@@ -244,7 +273,7 @@ void parseUdpAndIp(const unsigned char *p_packet_content, u_int32 lenth, u_int32
             for (int i = 0; i < length; ++i) {
                 out[i]=p_packet_content[i];
             }
-
+            forware_pkt(out,length);
             //net
         }
 
@@ -404,7 +433,7 @@ void getPcap(const unsigned  char *p_packet_content,struct  pcap_pkthdr protocol
 
 
 int main(int argc,char *argv[],char *envp[]){
-
+    init();
     strcpy(filename,argv[4]);
     net=atoi(argv[5]);
     if (remove(filename) == 0){
